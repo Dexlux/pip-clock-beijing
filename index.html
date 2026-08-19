@@ -175,17 +175,12 @@
     ctx.font = '400 24px -apple-system, sans-serif';
     ctx.fillText(`${parts.year}-${parts.month}-${parts.day} ${parts.weekday}`, W/2, 120);
 
-    // 时间(含毫秒)
-    const timeStr = `${parts.hour}:${parts.minute}:${parts.second}`;
+    // 时间(时分秒.毫秒 统一样式)
+    const ms = String(p.getUTCMilliseconds()).padStart(3, '0');
+    const timeStr = `${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
     ctx.fillStyle = '#f0f6fc';
-    ctx.font = '700 140px -apple-system, "SF Pro Display", sans-serif';
-    ctx.fillText(timeStr, W/2, 290);
-
-    // 毫秒
-    const ms = p.getUTCMilliseconds();
-    ctx.fillStyle = '#2f81f7';
-    ctx.font = '500 48px -apple-system, monospace';
-    ctx.fillText(`.${String(ms).padStart(3, '0')}`, W/2 + 180, 290);
+    ctx.font = '700 132px -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif';
+    ctx.fillText(timeStr, W / 2, 290);
 
     // 校准状态
     ctx.font = '400 18px -apple-system, sans-serif';

@@ -50,7 +50,7 @@
   </div>
   <div class="status" id="status">正在对时…</div>
 
-<canvas id="c" width="900" height="500" style="display:none"></canvas>
+<canvas id="c" width="900" height="250" style="display:none"></canvas>
 
 <script>
 (() => {
@@ -85,18 +85,20 @@
   }
 
   const particles = [];
-  for (let i = 0; i < 80; i++) particles.push(new Particle(900, 500));
+  for (let i = 0; i < 80; i++) particles.push(new Particle(900, 250));
 
   // 时间引擎
-  let offsetMs = 0, calibrated = false, lastRtt = 0;
+  let offsetMs = 0, calibrated = false, lastRtt = 0, calibrating = false;
+  let retryTimer = null;
   const nowCST = () => new Date(Date.now() + offsetMs);
 
-  // 多源对时(淘宝/苏宁/worldtimeapi/timeapi)
+  // 多源对时(淘宝/苏宁/worldtimeapi/timeapi/Cloudflare)
   const SOURCES = [
     { url: 'https://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp', parse: j => j?.data?.t },
     { url: 'https://quan.suning.com/getSysTime.do', parse: j => j?.sysTime1 ? Date.parse(j.sysTime1.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3T$4:$5:$6+08:00')) : NaN },
     { url: 'https://worldtimeapi.org/api/timezone/Asia/Shanghai', parse: j => j?.unixtime * 1000 },
-    { url: 'https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai', parse: j => Number.isFinite(j?.milliseconds) ? Date.UTC(j.year, j.month-1, j.day, j.hour, j.minute, j.second, j.milliseconds) : NaN }
+    { url: 'https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai', parse: j => Number.isFinite(j?.milliseconds) ? Date.UTC(j.year, j.month-1, j.day, j.hour, j.minute, j.second, j.milliseconds) : NaN },
+    { url: 'https://www.cloudflare.com/cdn-cgi/trace', parse: (txt) => { const m = String(txt).match(/\bt=(\d+)/); return m ? Number(m[1]) * 1000 : NaN; } }
   ];
 
   async function fetchTime(src) {
@@ -105,14 +107,19 @@
     const timer = setTimeout(() => ctrl.abort(), 4000);
     try {
       const r = await fetch(src.url, { signal: ctrl.signal, cache: 'no-store' });
-      const j = await r.json();
+      const raw = await r.text();
+      let j;
+      try { j = JSON.parse(raw); } catch { j = raw; }
       const ms = src.parse(j);
-      if (!Number.isFinite(ms)) throw new Error();
+      if (!Number.isFinite(ms)) throw new Error('bad payload');
       return { ms, rtt: performance.now() - t0 };
     } finally { clearTimeout(timer); }
   }
 
   async function calibrate() {
+    if (calibrating) return;
+    calibrating = true;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     let best = null;
     for (const src of SOURCES) {
       try {
@@ -123,19 +130,21 @@
       } catch { continue; }
       if (best) break;
     }
+    calibrating = false;
     if (best) {
       offsetMs = Math.round(best.ms + best.rtt / 2 - Date.now());
       calibrated = true; lastRtt = Math.round(best.rtt);
       status.innerHTML = `✅ 已对时: <b>${best.source}</b> RTT=${lastRtt}ms 偏移=${offsetMs>=0?'+':''}${offsetMs}ms`;
     } else {
       calibrated = false; offsetMs = 0;
-      status.innerHTML = '⚠️ 本地时间(设备可能不准)';
+      status.innerHTML = '⚠️ 对时源暂不可达,当前显示本地时间,30 秒后自动重试…';
+      retryTimer = setTimeout(calibrate, 30000);
     }
   }
 
   // 绘制时钟
   function draw() {
-    const W = 900, H = 500;
+    const W = 900, H = 250;
     const p = nowCST();
     const fmt = new Intl.DateTimeFormat('zh-CN', {
       timeZone: 'Asia/Shanghai', hour12: false,
@@ -169,24 +178,32 @@
       }
     }
 
-    // 日期
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#8b949e';
-    ctx.font = '400 24px -apple-system, sans-serif';
-    ctx.fillText(`${parts.year}-${parts.month}-${parts.day} ${parts.weekday}`, W/2, 120);
-
     // 时间(时分秒.毫秒 统一样式)
     const ms = String(p.getUTCMilliseconds()).padStart(3, '0');
     const timeStr = `${parts.hour}:${parts.minute}:${parts.second}.${ms}`;
     ctx.fillStyle = '#f0f6fc';
-    ctx.font = '700 132px -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif';
-    ctx.fillText(timeStr, W / 2, 290);
+    ctx.font = '700 118px -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif';
+    ctx.fillText(timeStr, W / 2, 172);
 
-    // 校准状态
-    ctx.font = '400 18px -apple-system, sans-serif';
-    ctx.textAlign = calibrated ? 'right' : 'left';
-    ctx.fillStyle = calibrated ? '#3fb950' : '#f85149';
-    ctx.fillText(calibrated ? '✅ 网络对时' : '⚠️ 本地时间', calibrated ? W - 40 : 40, 60);
+    // 日期
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '400 22px -apple-system, sans-serif';
+    ctx.fillText(`${parts.year}-${parts.month}-${parts.day} ${parts.weekday}`, W/2, 42);
+
+    // 校准状态角标(右上)
+    ctx.font = '400 17px -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    if (calibrated) {
+      ctx.fillStyle = '#3fb950';
+      ctx.fillText('✓ 已对时', W - 36, 42);
+    } else if (calibrating) {
+      ctx.fillStyle = '#d29922';
+      ctx.fillText('⏳ 校准中', W - 36, 42);
+    } else {
+      ctx.fillStyle = '#f85149';
+      ctx.fillText('⚠ 本地时间', W - 36, 42);
+    }
   }
 
   // 流 + PiP

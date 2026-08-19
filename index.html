@@ -2,321 +2,220 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>北京时间 · PiP 悬浮时钟</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --card: #161b22;
-    --border: #30363d;
-    --fg: #e6edf3;
-    --muted: #8b949e;
+    --bg: #05070a;
+    --time: #f0f6fc;
+    --sub: #8b949e;
     --accent: #2f81f7;
-    --green: #3fb950;
-    --red: #f85149;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: var(--bg); color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
-    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; padding: 24px; gap: 20px;
+    background: var(--bg); color: var(--time);
+    font-family: -apple-system, "SF Pro Display", "PingFang SC", monospace;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100vh; overflow: hidden;
   }
-  h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
-  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
-  .clock-wrap {
-    position: relative; width: min(720px, 92vw); border-radius: 16px; overflow: hidden;
-    border: 1px solid var(--border); background: #000;
-    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  #wrap {
+    position: relative; width: min(900px, 94vw);
+    border-radius: 24px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,.08);
+    background: #000; box-shadow: 0 40px 80px rgba(0,0,0,.8);
   }
-  .clock-wrap video { display: block; width: 100%; height: auto; }
-  .clock-wrap.no-pip::after {
-    content: "当前浏览器不支持画中画(PiP)\n可点视频右下角原生按钮"; white-space: pre;
-    position: absolute; inset: auto 0 0 0; background: rgba(0,0,0,.7); color: #ffd700;
-    font-size: 12px; text-align: center; padding: 4px;
+  video { display: block; width: 100%; height: auto; }
+  .controls {
+    margin-top: 20px; display: flex; gap: 12px;
   }
-  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
   button {
-    background: var(--accent); color: #fff; border: none; border-radius: 10px;
-    padding: 12px 28px; font-size: 16px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: none; border-radius: 12px;
+    padding: 14px 32px; font-size: 16px; font-weight: 600; cursor: pointer;
     transition: filter .15s, transform .05s;
   }
-  button:hover { filter: brightness(1.12); }
+  button:hover { filter: brightness(1.15); }
   button:active { transform: scale(.97); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  #status {
-    font-size: 13px; color: var(--muted); text-align: center; line-height: 1.8;
-    max-width: 560px;
+  button.secondary { background: #161b22; border: 1px solid #30363d; }
+  .status {
+    margin-top: 12px; font-size: 13px; color: var(--sub);
+    text-align: center;
   }
-  #status .ok { color: var(--green); }
-  #status .err { color: var(--red); }
-  #status .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .footer { font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
-  <h1>⏰ 北京时间<small>画中画悬浮时钟 · 抢购对时</small></h1>
-
-  <div class="clock-wrap" id="wrap">
-    <video id="video" autoplay muted playsinline controls></video>
-  </div>
-
+  <div id="wrap"><video id="v" autoplay muted playsinline></video></div>
   <div class="controls">
-    <button id="pipBtn">🖥️ 进入小窗 (PiP)</button>
-    <button id="syncBtn" style="background:#21262d;border:1px solid var(--border)">🔄 立即重新对时</button>
+    <button id="pipBtn">🖥️ 进入小窗</button>
+    <button id="syncBtn" class="secondary">🔄 对时</button>
   </div>
+  <div class="status" id="status">正在对时…</div>
 
-  <div id="status">正在对时…</div>
-  <div class="footer">纯前端 · 无服务器 · canvas 转视频流实现小窗 · 时间每 5 分钟自动校准</div>
-
-<canvas id="canvas" width="720" height="405" style="display:none"></canvas>
+<canvas id="c" width="900" height="500" style="display:none"></canvas>
 
 <script>
 (() => {
-  'use strict';
-
-  // ---------- 基础元素 ----------
-  const canvas = document.getElementById('canvas');
+  const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
-  const video = document.getElementById('video');
+  const video = document.getElementById('v');
   const pipBtn = document.getElementById('pipBtn');
   const syncBtn = document.getElementById('syncBtn');
-  const statusEl = document.getElementById('status');
-  const wrap = document.getElementById('wrap');
+  const status = document.getElementById('status');
 
-  // ---------- 时间引擎 ----------
-  // offsetMs = 真实北京时间(服务器) - 本地设备时间
-  let offsetMs = 0;            // 校准后的偏移
-  let calibrated = false;      // 是否成功对时
-  let lastRtt = 0;             // 最近一次往返延迟 ms
-  let offsetSource = '本地时间'; // 数据源描述
-
-  const nowCST = () => new Date(Date.now() + offsetMs);
-
-  // 北京时间各字段(与设备时区无关)
-  const partsCache = {};
-  function cstParts() {
-    const d = nowCST();
-    const fmt = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai', hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
-    const parts = fmt.formatToParts(d);
-    const p = {};
-    for (const x of parts) p[x.type] = x.value;
-    p.ms = d.getUTCMilliseconds(); // 仅用于进度条,展示用
-    return p;
+  // 粒子背景类
+  class Particle {
+    constructor(W, H) { this.W = W; this.H = H; this.reset(); }
+    reset() {
+      this.x = Math.random() * this.W;
+      this.y = Math.random() * this.H;
+      this.vx = (Math.random() - 0.5) * 0.3;
+      this.vy = (Math.random() - 0.5) * 0.3;
+      this.r = Math.random() * 1.5 + 0.5;
+      this.alpha = Math.random() * 0.4 + 0.1;
+    }
+    update() {
+      this.x += this.vx; this.y += this.vy;
+      if (this.x < 0 || this.x > this.W || this.y < 0 || this.y > this.H) this.reset();
+    }
+    draw(ctx) {
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(47,129,247,${this.alpha})`;
+      ctx.fill();
+    }
   }
 
-  // ---------- 网络对时(多源自动降级 + RTT 补偿) ----------
-  // 每个源测 max 3 次,取 RTT 最小的一次
-  async function fetchServerTime(url, parse) {
+  const particles = [];
+  for (let i = 0; i < 80; i++) particles.push(new Particle(900, 500));
+
+  // 时间引擎
+  let offsetMs = 0, calibrated = false, lastRtt = 0;
+  const nowCST = () => new Date(Date.now() + offsetMs);
+
+  // 多源对时(淘宝/苏宁/worldtimeapi/timeapi)
+  const SOURCES = [
+    { url: 'https://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp', parse: j => j?.data?.t },
+    { url: 'https://quan.suning.com/getSysTime.do', parse: j => j?.sysTime1 ? Date.parse(j.sysTime1.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3T$4:$5:$6+08:00')) : NaN },
+    { url: 'https://worldtimeapi.org/api/timezone/Asia/Shanghai', parse: j => j?.unixtime * 1000 },
+    { url: 'https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai', parse: j => Number.isFinite(j?.milliseconds) ? Date.UTC(j.year, j.month-1, j.day, j.hour, j.minute, j.second, j.milliseconds) : NaN }
+  ];
+
+  async function fetchTime(src) {
     const t0 = performance.now();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 4000);
     try {
-      const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
-      const json = await res.json();
-      const serverMs = parse(json);
-      if (!Number.isFinite(serverMs)) throw new Error('bad payload');
-      const t1 = performance.now();
-      const rtt = t1 - t0;
-      return { serverMs, rtt };
-    } catch (e) {
-      throw new Error(url.split('/')[2] + ' 失败');
-    } finally {
-      clearTimeout(timer);
-    }
+      const r = await fetch(src.url, { signal: ctrl.signal, cache: 'no-store' });
+      const j = await r.json();
+      const ms = src.parse(j);
+      if (!Number.isFinite(ms)) throw new Error();
+      return { ms, rtt: performance.now() - t0 };
+    } finally { clearTimeout(timer); }
   }
 
-  const SOURCES = [
-    {
-      name: '淘宝 mtop',
-      url: 'https://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp',
-      parse: (j) => j && j.data && j.data.t ? Number(j.data.t) : NaN
-    },
-    {
-      name: '苏宁',
-      url: 'https://quan.suning.com/getSysTime.do',
-      parse: (j) => {
-        if (j && j.sysTime1) {
-          const s = String(j.sysTime1); // yyyyMMddHHmmss
-          return Date.parse(s.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3T$4:$5:$6+08:00'));
-        }
-        return NaN;
-      }
-    },
-    {
-      name: 'worldtimeapi',
-      url: 'https://worldtimeapi.org/api/timezone/Asia/Shanghai',
-      parse: (j) => j && j.unixtime ? Number(j.unixtime) * 1000 : NaN
-    },
-    {
-      name: 'timeapi.io',
-      url: 'https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai',
-      parse: (j) => {
-        if (j && Number.isFinite(j.milliseconds)) {
-          return Date.UTC(j.year, j.month - 1, j.day, j.hour, j.minute, j.second, j.milliseconds);
-        }
-        return NaN;
-      }
-    }
-  ];
-
-  async function calibrate(showMsg) {
-    if (showMsg) setStatus('正在对时…', '');
+  async function calibrate() {
     let best = null;
     for (const src of SOURCES) {
       try {
         for (let i = 0; i < 3; i++) {
-          const m = await fetchServerTime(src.url, src.parse);
-          if (!best || m.rtt < best.rtt) best = { ...m, source: src.name };
+          const m = await fetchTime(src);
+          if (!best || m.rtt < best.rtt) best = { ...m, source: src.url.split('/')[2] };
         }
-      } catch (e) { /* 换下一个源 */ }
-      if (best) break; // 已有可用源,不再试后面的
+      } catch { continue; }
+      if (best) break;
     }
-
     if (best) {
-      // 服务器响应到达客户端的时刻,服务器时钟 ≈ serverMs + rtt/2
-      // 此刻本地时钟 = t0 + rtt = (performance 基准对齐)
-      const now = Date.now();
-      offsetMs = Math.round(best.serverMs + best.rtt / 2 - now);
-      calibrated = true;
-      lastRtt = Math.round(best.rtt);
-      offsetSource = best.source;
-      setStatus(
-        `✅ 已对时:源=<span class="mono">${best.source}</span> RTT=<span class="mono">${lastRtt}ms</span> 校准偏移=<span class="mono">${offsetMs >= 0 ? '+' : ''}${offsetMs}ms</span>`,
-        'ok'
-      );
+      offsetMs = Math.round(best.ms + best.rtt / 2 - Date.now());
+      calibrated = true; lastRtt = Math.round(best.rtt);
+      status.innerHTML = `✅ 已对时: <b>${best.source}</b> RTT=${lastRtt}ms 偏移=${offsetMs>=0?'+':''}${offsetMs}ms`;
     } else {
-      calibrated = false;
-      offsetMs = 0;
-      offsetSource = '本地时间';
-      setStatus('⚠️ 所有对时源都不可达,当前显示<b>设备本地时间</b>(可能不准,抢购前请检查设备时间)', 'err');
+      calibrated = false; offsetMs = 0;
+      status.innerHTML = '⚠️ 本地时间(设备可能不准)';
     }
-    return calibrated;
   }
 
-  function setStatus(html, cls) {
-    statusEl.innerHTML = cls ? `<span class="${cls}">${html}</span>` : html;
-  }
-
-  // ---------- 时钟绘制 ----------
+  // 绘制时钟
   function draw() {
-    const W = canvas.width, H = canvas.height;
+    const W = 900, H = 500;
+    const p = nowCST();
+    const fmt = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', hour12: false,
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short'
+    }).formatToParts(p);
+
+    const parts = {};
+    for (const x of fmt) parts[x.type] = x.value;
+
+    // 背景
     ctx.fillStyle = '#05070a';
     ctx.fillRect(0, 0, W, H);
 
-    // 卡片背景
-    ctx.fillStyle = '#0b0f14';
-    roundRect(ctx, 18, 18, W - 36, H - 36, 28);
-    ctx.fill();
-    ctx.strokeStyle = '#1c2530';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // 粒子
+    particles.forEach(p => { p.update(); p.draw(ctx); });
 
-    const p = cstParts();
+    // 连线
+    for (let i = 0; i < particles.length; i++) {
+      for (let j = i + 1; j < particles.length; j++) {
+        const dx = particles[i].x - particles[j].x;
+        const dy = particles[i].y - particles[j].y;
+        const d = Math.sqrt(dx*dx + dy*dy);
+        if (d < 80) {
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x, particles[i].y);
+          ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.strokeStyle = `rgba(47,129,247,${0.1 * (1 - d/80)})`;
+          ctx.stroke();
+        }
+      }
+    }
 
-    // 日期行
+    // 日期
     ctx.textAlign = 'center';
     ctx.fillStyle = '#8b949e';
-    ctx.font = '600 30px "SF Pro Display", -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText(`${p.year}-${p.month}-${p.day} ${p.weekday}`, W / 2, 92);
+    ctx.font = '400 24px -apple-system, sans-serif';
+    ctx.fillText(`${parts.year}-${parts.month}-${parts.day} ${parts.weekday}`, W/2, 120);
 
-    // 时间大字(含秒)
+    // 时间(含毫秒)
+    const timeStr = `${parts.hour}:${parts.minute}:${parts.second}`;
     ctx.fillStyle = '#f0f6fc';
-    ctx.font = '700 150px "SF Pro Display", -apple-system, "PingFang SC", "Helvetica Neue", sans-serif';
-    const t = `${p.hour}:${p.minute}:${p.second}`;
-    ctx.fillText(t, W / 2, 268);
+    ctx.font = '700 140px -apple-system, "SF Pro Display", sans-serif';
+    ctx.fillText(timeStr, W/2, 290);
 
-    // 毫秒/秒进度条
-    const frac = (p.ms || 0) / 1000;
-    const bx = W / 2 - 190, bw = 380, by = 316;
-    ctx.fillStyle = '#1c2530';
-    roundRect(ctx, bx, by, bw, 10, 5);
-    ctx.fill();
-    ctx.fillStyle = frac < 0.9 ? '#2f81f7' : '#f85149';
-    roundRect(ctx, bx, by, Math.max(6, bw * frac), 10, 5);
-    ctx.fill();
+    // 毫秒
+    const ms = p.getUTCMilliseconds();
+    ctx.fillStyle = '#2f81f7';
+    ctx.font = '500 48px -apple-system, monospace';
+    ctx.fillText(`.${String(ms).padStart(3, '0')}`, W/2 + 180, 290);
 
-    // 校准状态角标
-    ctx.font = '500 20px "SF Pro Display", sans-serif';
-    ctx.textAlign = 'right';
-    if (calibrated) {
-      ctx.fillStyle = '#3fb950';
-      ctx.fillText('⏱ 已网络对时', W - 42, 56);
-    } else {
-      ctx.fillStyle = '#f85149';
-      ctx.fillText('⚠ 本地时间', W - 42, 56);
-    }
-
-    // 版权/水印
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#3d444d';
-    ctx.font = '400 17px sans-serif';
-    ctx.fillText('北京时间 · PiP 时钟', 42, 56);
+    // 校准状态
+    ctx.font = '400 18px -apple-system, sans-serif';
+    ctx.textAlign = calibrated ? 'right' : 'left';
+    ctx.fillStyle = calibrated ? '#3fb950' : '#f85149';
+    ctx.fillText(calibrated ? '✅ 网络对时' : '⚠️ 本地时间', calibrated ? W - 40 : 40, 60);
   }
 
-  function roundRect(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  }
+  // 流 + PiP
+  video.srcObject = canvas.captureStream(10);
+  video.play().catch(() => {});
 
-  // ---------- 视频流 + PiP ----------
-  function setupStream() {
-    const stream = canvas.captureStream(10); // 10fps 足够且省资源
-    video.srcObject = stream;
-    video.play().catch(() => {});
-    video.setAttribute('controlslist', 'nodownload noremoteplayback');
-  }
-
-  const pipSupported =
-    ('pictureInPictureEnabled' in document && document.pictureInPictureEnabled) ||
-    ('webkitSetPresentationMode' in video);
-
-  function enterPip() {
-    if (document.pictureInPictureElement) {
-      return document.exitPictureInPicture();
-    }
-    if ('requestPictureInPicture' in video) {
-      return video.requestPictureInPicture();
-    }
-    if ('webkitSetPresentationMode' in video) {
-      return video.webkitSetPresentationMode('picture-in-picture');
-    }
-    return Promise.reject(new Error('unsupported'));
-  }
-
+  const pipSupported = 'pictureInPictureEnabled' in document && document.pictureInPictureEnabled;
   pipBtn.addEventListener('click', () => {
-    enterPip().catch((e) => {
-      setStatus('⚠️ 进入小窗失败:' + e.message + '。请点击视频画面右下角的原生 PiP 按钮。', 'err');
-    });
+    if (document.pictureInPictureElement) return document.exitPictureInPicture();
+    ('requestPictureInPicture' in video) ? video.requestPictureInPicture()
+      : ('webkitSetPresentationMode' in video) ? video.webkitSetPresentationMode('picture-in-picture')
+      : status.innerHTML = '⚠️ 浏览器不支持 PiP';
   });
 
-  syncBtn.addEventListener('click', () => calibrate(true));
-  video.addEventListener('enterpictureinpicture', () => {
-    setStatus('📌 已进入小窗!可切到任何页面/App,时钟悬浮显示。点击下方按钮可退出。', 'ok');
-  });
-  video.addEventListener('leavepictureinpicture', () => {
-    setStatus('已退出小窗。点击"进入小窗"可再次悬浮。', '');
-  });
+  syncBtn.addEventListener('click', calibrate);
+  video.addEventListener('enterpictureinpicture', () => status.innerHTML = '📌 已小窗!');
+  video.addEventListener('leavepictureinpicture', () => status.innerHTML = '已退出小窗');
 
-  // ---------- 启动 ----------
   async function init() {
-    setupStream();
-    if (!pipSupported) wrap.classList.add('no-pip');
-    await calibrate(false);          // 启动对时
-    setInterval(() => calibrate(false), 5 * 60 * 1000); // 每 5 分钟自动校准
-    setInterval(draw, 100);          // 后台节流到 1s 也能走秒
+    await calibrate();
+    setInterval(calibrate, 5 * 60 * 1000);
+    setInterval(draw, 50);
     draw();
   }
-
   init();
 })();
 </script>

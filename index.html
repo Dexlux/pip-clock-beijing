@@ -184,18 +184,19 @@
     }
   }
 
+  // 北京时间格式化器(缓存,避免每帧重建)
+  const FMT = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour12: false,
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short'
+  });
+
   // 绘制时钟
   function draw() {
     const W = 900, H = 250;
     const p = nowCST();
-    const fmt = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai', hour12: false,
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short'
-    }).formatToParts(p);
-
     const parts = {};
-    for (const x of fmt) parts[x.type] = x.value;
+    for (const x of FMT.formatToParts(p)) parts[x.type] = x.value;
 
     // 背景
     ctx.fillStyle = '#05070a';
@@ -250,7 +251,7 @@
   }
 
   // 流 + PiP
-  video.srcObject = canvas.captureStream(10);
+  video.srcObject = canvas.captureStream(30); // 30fps 视频流,毫秒更新顺滑
   video.play().catch(() => {});
 
   const pipSupported = 'pictureInPictureEnabled' in document && document.pictureInPictureEnabled;
@@ -268,8 +269,9 @@
   async function init() {
     await calibrate();
     setInterval(calibrate, 5 * 60 * 1000);
-    setInterval(draw, 50);
-    draw();
+    // 前台:requestAnimationFrame 逐帧重绘(60fps 丝滑);后台:setInterval 兜底保秒
+    setInterval(() => { if (document.hidden) draw(); }, 100);
+    (function loop() { draw(); requestAnimationFrame(loop); })();
   }
   init();
 })();

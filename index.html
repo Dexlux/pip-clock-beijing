@@ -186,6 +186,14 @@
 
   // 对时源(实测可通);res = 自身分辨率(ms),决定单样本不确定度与选源权重
   const SOURCES = [
+    { name: '大阪自建', kind: 'fetch', res: 1, n: 5,
+      url: 'https://t.infiniteai.asia/now',
+      parse: (raw) => {
+        try {
+          const j = JSON.parse(raw);
+          return (j && Number.isFinite(Number(j.t))) ? Number(j.t) * 1000 : NaN;
+        } catch { return NaN; }
+      } },
     { name: 'timeapi.io', kind: 'fetch', res: 1, n: 5,
       url: 'https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai',
       parse: (raw) => {

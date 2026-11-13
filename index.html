@@ -110,7 +110,42 @@
   let deviation = 0;        // 本次测得、未收缩的原始偏差(正=本机慢)
   let deviceTrusted = true; // true = 判定设备时钟本来就在误差内,没做修正
   let accurate = false;     // true = 达到"校准完成"标准
+  let lastRes = Infinity;   // 本次选中源的分辨率(角标判档用)
+  let cacheShown = false;   // 本次首屏用的是上次缓存值,阶段 1 不覆盖那条文案
   const ACCURATE_UNC_MS = 400; // 完成门槛
+
+  // 上次校准结果的本地缓存:二次打开先有时间可读,再静默重校
+  const CACHE_KEY = 'pipclock.calib';
+  const CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+  function readCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      const c = JSON.parse(raw);
+      if (!c || !Number.isFinite(c.off) || !Number.isFinite(c.unc) || !Number.isFinite(c.at)) return null;
+      const age = Date.now() - c.at;
+      if (age > CACHE_MAX_AGE_MS || age < -60000) return null; // 时钟被改到过去也作废
+      return c;
+    } catch { return null; } // 隐私模式下 localStorage 会抛异常,不能拖垮整页
+  }
+  function writeCache() {
+    try {
+      if (!calibrated || !Number.isFinite(offsetMs) || !Number.isFinite(uncMs)) return;
+      localStorage.setItem(CACHE_KEY,
+        JSON.stringify({ off: offsetMs, unc: Math.round(uncMs), at: Date.now() }));
+    } catch {}
+  }
+  function applyCache() {
+    const c = readCache();
+    if (!c) return;
+    offsetMs = c.off; uncMs = c.unc; calibrated = true; accurate = false;
+    quality = 'none'; lastSource = '—'; lastRes = Infinity;
+    anchor = { epoch: Date.now() + offsetMs, perf: performance.now() };
+    cacheShown = true;
+    // 缓存值不参与历史平滑:hist 仍从空开始
+    setStatus(`⚡ 沿用上次校准（±${Math.round(c.unc)}ms）` +
+      `<span class="sub">正在重新校准…</span>`);
+  }
 
   const pad2 = (n) => String(n).padStart(2, '0');
   const pad3 = (n) => String(n).padStart(3, '0');
@@ -125,7 +160,7 @@
 
   // JSONP 加载器(绕过 CORS,腾讯接口是 JSONP 格式)
   // 带着 t4 一起 resolve:脚本执行完即取,解析开销计入 RTT(故单样本额外 +40ms 不确定度)
-  function jsonp(url, timeout = 5000) {
+  function jsonp(url, timeout = 3500) {
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
       const timer = setTimeout(() => { s.remove(); reject(new Error('timeout')); }, timeout);
@@ -184,7 +219,7 @@
         srv = src.parse(r.v);
       } else {
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 6000);
+        const timer = setTimeout(() => ctrl.abort(), 3500);
         try {
           const r = await fetch(bust(src.url), { cache: 'no-store', signal: ctrl.signal });
           t4 = performance.now();          // 响应头一到就取,body 读取不算 RTT
@@ -219,12 +254,15 @@
     };
   }
 
-  // 单源顺序采样(并行会互相排队,把 RTT 打歪)
-  async function collect(src) {
+  // 单源顺序采样(并行会互相排队,把 RTT 打歪);连续两次失败就判定该源在本网络不可用,不再跑满 n 次
+  async function collect(src, seed) {
     const out = [];
-    for (let i = 0; i < src.n; i++) {
+    if (seed) out.push(seed);   // 复用第一阶段的样本,不重复请求
+    let fails = 0;
+    for (let i = out.length; i < src.n; i++) {
       const s = await sample(src);
-      if (s) out.push(s);
+      if (s) { out.push(s); fails = 0; }
+      else if (++fails >= 2) break;
     }
     const a = aggregate(out, src.res);
     return a ? { name: src.name, res: src.res, ...a } : null;
@@ -250,13 +288,44 @@
     calibrating = true;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     try {
-      const per = await Promise.all(SOURCES.map(collect));
+      // 阶段 1:每源先采 1 个样本,谁先回来谁先上屏(手机上通常 1 秒内),更优的样本继续顶替
+      // 失败也不许中断阶段 2
+      const seeds = SOURCES.map(() => null);
+      try {
+        let best = null;
+        const takeSeed = async (s, i) => {
+          const one = await sample(s).catch(() => null);
+          seeds[i] = one;
+          if (!one || cacheShown) return;
+          // 分辨率优先、同分辨率比不确定度,只让更优的样本改写首屏值
+          if (best && (s.res > best.res || (s.res === best.res && one.u >= best.u))) return;
+          best = { res: s.res, u: one.u };
+          const k1 = Math.abs(one.offset) > one.u ? 1 - (one.u / one.offset) ** 2 : 0;
+          offsetMs = one.offset * k1;
+          uncMs = one.u;
+          deviation = one.offset;
+          deviceTrusted = k1 === 0;
+          accurate = false;
+          calibrated = true;
+          lastRes = s.res;
+          quality = qualityOf(uncMs, s.res <= 1);
+          lastSource = s.name;
+          anchor = { epoch: offsetMs + Date.now(), perf: performance.now() };
+          setStatus(`🟡 已对时 · 精度 ${s.res > 1 ? '±0.5 秒' : '±' + Math.round(uncMs) + 'ms'}` +
+            `<span class="sub">初步结果，正在补采样本细化 · 源 ${s.name}</span>`);
+        };
+        await Promise.all(SOURCES.map(takeSeed));
+      } catch {}
+
+      // 阶段 2:带着第一阶段的样本补采,拿到完整结果再精化(覆盖阶段 1)
+      const per = await Promise.all(SOURCES.map((s, i) => collect(s, seeds[i])));
       const alive = per.filter(a => a && Number.isFinite(a.est));
       lastCalAt = performance.now();
 
       if (!alive.length) {
         calibrated = false; failCount++;
         accurate = false;
+        cacheShown = false;
         // 失败不重置 offsetMs → 自动沿用上次成功校准值(设备时钟几分钟内漂移可忽略)
         const hint = offsetMs !== 0 ? '暂时沿用上次校准值' : '显示本机时间';
         setStatus(`⚠️ 对时失败（第 ${failCount} 次）` +
@@ -345,10 +414,12 @@
       offsetMs = appliedOffset; uncMs = residualUnc; quality = nextQuality;
       deviation = merged; deviceTrusted = trustedNow; accurate = accurateNow;
       calibrated = true; failCount = 0;
-      lastSource = pick.name;
+      lastSource = pick.name; lastRes = pick.res;
       lastSamplesCount = alive.reduce((n, a) => n + a.n, 0);
       lastRtt = pick.minRtt;
       anchor = { epoch: offsetMs + Date.now(), perf: performance.now() }; // 成功后重设锚点
+      cacheShown = false;
+      writeCache();
 
       if (accurate && deviceTrusted) {
         // 主行说"现在准不准",原偏差降级为补充说明
@@ -357,9 +428,14 @@
       } else if (accurate) {
         setStatus(`🔧 本机原本${deviation > 0 ? '慢' : '快'} ${fmtDev(deviation)}，已补正` +
           `<span class="sub">现在误差 ±${Math.round(residualUnc)}ms · 源 ${pick.name}</span>`);
+      } else if (pick.res > 1) {
+        // 只有整秒源:已经校完,只是精度档低 —— 不能再显示"校准中"
+        setStatus(`🟡 已对时 · 精度 ±0.5 秒` +
+          `<span class="sub">当前网络连不上毫秒源，只能按秒校时 · 源 ${pick.name}</span>`);
       } else {
-        setStatus(`⏳ 校准中：${pick.res > 1 ? '只有秒级源' : '源精度不够'}` +
-          `<span class="sub">当前误差 ±${Math.round(residualUnc)}ms · 源 ${pick.name}</span>`);
+        // 有毫秒源但残余误差偏大:网络慢,这已经是最优结果
+        setStatus(`🟡 已对时 · 精度 ±${Math.round(residualUnc)}ms` +
+          `<span class="sub">网络较慢，已是最优结果 · 源 ${pick.name}</span>`);
       }
     } finally {
       calibrating = false;
@@ -437,12 +513,15 @@
     } else if (accurate) {
       ctx.fillStyle = '#3fb950';
       ctx.fillText('✓ 已补正', W - 36, 42);
+    } else if (calibrated && lastRes > 1) {
+      ctx.fillStyle = '#d29922';
+      ctx.fillText('🟡 秒级精度', W - 36, 42);
     } else if (calibrated) {
       ctx.fillStyle = '#d29922';
-      ctx.fillText('⏳ 校准中', W - 36, 42);
+      ctx.fillText('🟡 精度一般', W - 36, 42);
     } else if (offsetMs !== 0) {
       ctx.fillStyle = '#d29922';
-      ctx.fillText('⏳ 沿用上次校准', W - 36, 42);
+      ctx.fillText('⏳ 对时中', W - 36, 42);
     } else {
       ctx.fillStyle = '#f85149';
       ctx.fillText('⚠ 本地时间', W - 36, 42);
@@ -486,6 +565,10 @@
   };
 
   async function init() {
+    applyCache(); // 10 分钟内的上次结果:先有时间可读,再重校
+    if (!cacheShown) {
+      setStatus(`⏳ 正在对时…<span class="sub">正在从多个时间源校准</span>`);
+    }
     // 先跑帧循环:对时期间显示本地时间,角标和状态栏会说明精度
     setInterval(() => { if (document.hidden) draw(); }, 100);
     (function loop() { draw(); requestAnimationFrame(loop); })();

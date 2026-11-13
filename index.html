@@ -40,6 +40,9 @@
     margin-top: 12px; font-size: 13px; color: var(--sub);
     text-align: center;
   }
+  .status .sub {
+    display: block; font-size: 12px; opacity: .62; margin-top: 2px;
+  }
 </style>
 </head>
 <body>
@@ -104,6 +107,10 @@
   const HIST_MAX_AGE_MS = 20 * 60 * 1000;  // 超过 20 分钟的结果不再参与
   let hist = [];                           // [{ off, u, at }]  at = performance.now()
   let rawOffset = 0;                       // 最近一次未合并的 nextOffset(调试用)
+  let deviation = 0;        // 本次测得、未收缩的原始偏差(正=本机慢)
+  let deviceTrusted = true; // true = 判定设备时钟本来就在误差内,没做修正
+  let accurate = false;     // true = 达到"校准完成"标准
+  const ACCURATE_UNC_MS = 400; // 完成门槛
 
   const pad2 = (n) => String(n).padStart(2, '0');
   const pad3 = (n) => String(n).padStart(3, '0');
@@ -231,6 +238,10 @@
     return 'coarse';
   }
   const signed = (n) => (n >= 0 ? '+' : '') + Math.round(n);
+  // 偏差的人话格式化:大偏差说秒,小偏差说毫秒
+  const fmtDev = (n) => Math.abs(n) >= 1000
+    ? (Math.abs(n) / 1000).toFixed(1).replace(/\.0$/, '') + ' 秒'
+    : Math.round(Math.abs(n)) + 'ms';
   const setStatus = (txt) => { status.innerHTML = txt; };
 
   // 校准:源间并行、源内串行 → 跨源一致性 → 按不确定度加权
@@ -245,9 +256,11 @@
 
       if (!alive.length) {
         calibrated = false; failCount++;
+        accurate = false;
         // 失败不重置 offsetMs → 自动沿用上次成功校准值(设备时钟几分钟内漂移可忽略)
-        const hint = offsetMs !== 0 ? '沿用上次校准值' : '显示本地时间';
-        setStatus(`⚠️ 对时失败(第${failCount}次),${hint},${RETRY_MS / 1000}秒后自动重试…`);
+        const hint = offsetMs !== 0 ? '暂时沿用上次校准值' : '显示本机时间';
+        setStatus(`⚠️ 对时失败（第 ${failCount} 次）` +
+          `<span class="sub">${hint} · ${RETRY_MS / 1000} 秒后自动重试</span>`);
         retryTimer = setTimeout(calibrate, RETRY_MS);
         return;
       }
@@ -286,7 +299,7 @@
 
       // 跳变保护:精度不足又跳超过 2 秒,宁可丢弃这次结果,也别让画面乱跳
       if (calibrated && Math.abs(nextOffset - offsetMs) > 2000 && nextUnc > 300) {
-        setStatus(`⚠️ 本次对时偏差 ${signed(nextOffset - offsetMs)}ms 过大且精度不足,已忽略,3 秒后重试…`);
+        setStatus(`⚠️ 本次结果与当前校准值差 ${fmtDev(nextOffset - offsetMs)}，但精度不足(±${Math.round(nextUnc)}ms)，已忽略，3 秒后重试…`);
         retryTimer = setTimeout(calibrate, 3000);
         return;
       }
@@ -302,7 +315,7 @@
         }
         const histMean = ha / hw;
         if (hist.length >= 2 && Math.abs(nextOffset - histMean) > 500 && nextUnc > 300) {
-          setStatus(`⚠️ 本次对时偏离历史 ${signed(nextOffset - histMean)}ms，已忽略，3 秒后重试…`);
+          setStatus(`⚠️ 本次结果与历史均值差 ${fmtDev(nextOffset - histMean)}，已忽略，3 秒后重试…`);
           retryTimer = setTimeout(calibrate, 3000);
           return;
         }
@@ -318,17 +331,36 @@
       const mergedUnc = Math.max(combUnc, 0.55 * nextUnc);
       const nextQuality = qualityOf(mergedUnc, pick.res <= 1);
 
-      offsetMs = merged; uncMs = mergedUnc; quality = nextQuality;
+      // 反向门控(收缩估计):|偏差| 不比自身不确定度大时,这个偏差无法与 0 区分 → 按噪声处理,不修正
+      // 连续、无跳变:k=0 表示完全不动,k→1 表示照单全收
+      const shrinkK = Math.abs(merged) > mergedUnc ? 1 - (mergedUnc / merged) ** 2 : 0;
+      const appliedOffset = merged * shrinkK;
+      const trustedNow = shrinkK === 0;
+      // 未修正时,残余误差仍然由本次测量的不确定度兜底(不能因为"没动"就宣称更准)
+      const residualUnc = trustedNow ? Math.max(Math.abs(merged), mergedUnc) : mergedUnc;
+      // 完成标准:必须拿到毫秒级源,且残余误差在门槛内;否则只能算"校准中"
+      const gate = accurate ? ACCURATE_UNC_MS * 1.4 : ACCURATE_UNC_MS;
+      const accurateNow = pick.res <= 1 && residualUnc <= gate;
+
+      offsetMs = appliedOffset; uncMs = residualUnc; quality = nextQuality;
+      deviation = merged; deviceTrusted = trustedNow; accurate = accurateNow;
       calibrated = true; failCount = 0;
       lastSource = pick.name;
       lastSamplesCount = alive.reduce((n, a) => n + a.n, 0);
       lastRtt = pick.minRtt;
       anchor = { epoch: offsetMs + Date.now(), perf: performance.now() }; // 成功后重设锚点
 
-      const detail = `<b>${pick.name}</b> ±${Math.round(uncMs)}ms  RTT=${Math.round(lastRtt)}ms  偏移=${signed(offsetMs)}ms`;
-      setStatus(quality === 'good' ? `✅ 已对时: ${detail}`
-        : quality === 'ok' ? `🟡 已对时(精度一般): ${detail}`
-        : `⚠️ 粗对时(±0.5s): ${detail}`);
+      if (accurate && deviceTrusted) {
+        // 主行说"现在准不准",原偏差降级为补充说明
+        setStatus(`✅ 与标准北京时间一致<span class="sub">本机与标准时间相差 ${Math.round(Math.abs(deviation))}ms，` +
+          `在测量误差 ±${Math.round(residualUnc)}ms 内，未做修正 · 源 ${pick.name}</span>`);
+      } else if (accurate) {
+        setStatus(`🔧 本机原本${deviation > 0 ? '慢' : '快'} ${fmtDev(deviation)}，已补正` +
+          `<span class="sub">现在误差 ±${Math.round(residualUnc)}ms · 源 ${pick.name}</span>`);
+      } else {
+        setStatus(`⏳ 校准中：${pick.res > 1 ? '只有秒级源' : '源精度不够'}` +
+          `<span class="sub">当前误差 ±${Math.round(residualUnc)}ms · 源 ${pick.name}</span>`);
+      }
     } finally {
       calibrating = false;
     }
@@ -399,12 +431,15 @@
     // 校准状态角标(右上)
     ctx.font = '400 17px -apple-system, sans-serif';
     ctx.textAlign = 'right';
-    if (calibrated && quality === 'coarse') {
-      ctx.fillStyle = '#d29922';
-      ctx.fillText('⚠ 粗对时', W - 36, 42);
-    } else if (calibrated) {
+    if (accurate && deviceTrusted) {
       ctx.fillStyle = '#3fb950';
-      ctx.fillText('✓ 已对时', W - 36, 42);
+      ctx.fillText('✓ 无需修正', W - 36, 42);
+    } else if (accurate) {
+      ctx.fillStyle = '#3fb950';
+      ctx.fillText('✓ 已补正', W - 36, 42);
+    } else if (calibrated) {
+      ctx.fillStyle = '#d29922';
+      ctx.fillText('⏳ 校准中', W - 36, 42);
     } else if (offsetMs !== 0) {
       ctx.fillStyle = '#d29922';
       ctx.fillText('⏳ 沿用上次校准', W - 36, 42);
@@ -432,7 +467,7 @@
 
   // 只读调试钩子(自动化验收用,不影响 UI)
   window.__clock = {
-    get state() { return { offsetMs, uncMs, calibrated, source: lastSource, samples: lastSamplesCount, quality, histLen: hist.length, rawOffset }; },
+    get state() { return { offsetMs, uncMs, calibrated, source: lastSource, samples: lastSamplesCount, quality, histLen: hist.length, rawOffset, deviceTrusted, accurate, deviation, appliedOffset: offsetMs }; },
     get nowMs() { return nowMs(); },
     get draws() { return drawCount; },
     calibrate,
